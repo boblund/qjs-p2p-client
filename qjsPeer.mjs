@@ -2,6 +2,7 @@ export { QjsPeer };
 import * as os from 'os';
 import { TextEncoder, TextDecoder } from './EncodeDecode.mjs';
 import { PeerConnection } from './dc.so';
+import { PriorityChannel } from './priorityChannel.mjs';
 
 const enc = new TextEncoder;
 
@@ -15,14 +16,8 @@ function encodeMsg( { type, data = {} } ){
 }
 
 class QjsPeer{
-	static HIGH_WATER_MARK = 64 * 1024;
-	static LOW_WATER_MAKE = 16 * 104;
-
-	controlMsgQueue = [];
-	fileSendQueue = [];
-	sendFileObj = {};
-	pumping = false;
-	buf = new Uint8Array( 4096 );
+	priorityChannel;
+	typeToQueue = () => { throw( 'QjsPeer.typeToQueue not set' ); };
 	initiator;
 	agent;
 
@@ -36,45 +31,6 @@ class QjsPeer{
 
 	listenerNames = Object.keys( this.listeners );
 
-	pump(){
-		if( this.pumping ) return;
-		this.pumping = true;
-
-		while ( this.agent.getBufferedAmount() < QjsPeer.HIGH_WATER_MARK
-			&& ( this.controlMsgQueue.length > 0 || this.sendFileObj.fd > -1 || this.fileSendQueue.length > 0 ) ) {
-			if( this.controlMsgQueue.length > 0 ){
-				const { type, data } = this.controlMsgQueue.shift();
-				this.agent.sendBuf( encodeMsg( { type, data } ).buffer );
-				continue;
-			}
-
-			if( this?.sendFileObj?.fd > -1 ){
-				// send chunks of existing file transfer next
-				let n = os.read( this.sendFileObj.fd, this.buf.buffer, 0, this.buf.length );
-				if ( n <= 0 ){
-					this.agent.sendBuf( encodeMsg( { type: n == 0 ? 'eof' : 'error' } ).buffer );
-					os.close( this.sendFileObj.fd );
-					this.sendFileObj.fd = -1;
-					this.sendFileObj.offset = 0;
-					continue;
-				}
-				this.agent.sendBuf( encodeMsg( { type: 'chunk', data: this.buf.slice( 0, n ) } ).buffer );
-				this.sendFileObj.offset += n;
-				continue;
-			}
-
-			if( this.fileSendQueue.length > 0 ){
-				const { data: fileName, resultCb } = this.fileSendQueue.shift();
-				this.sendFileObj = { fileName, resultCb, fd: -1, offset: 0 };
-				this.agent.sendBuf( encodeMsg( { type: 'file', data: fileName } ).buffer );
-				console.log( `[Send file] starting: ${ this.sendFileObj.fileName }` );
-				continue;
-			}
-		}
-
-		this.pumping = false;
-	};
-
 	constructor( { initiator, label } = { initiator: false, label: 'not_set' } ){
 		this.agent = new PeerConnection( {
 			stun_host: "stun.l.google.com",
@@ -84,22 +40,27 @@ class QjsPeer{
 		} );
 
 		this.initiator = initiator;
+		//console.log( `this.agent.getBufferedAmount: ${ this.agent?.getBufferedAmount }` );
 
 		this.agent.dcOpen = () => { this.listeners.connect(); };
 		dcMsgHandler( this );
+	}
+
+	createQueues( queuesOrder ){
+		this.priorityChannel = new PriorityChannel( {
+			sendFn: ( item ) => { this.agent.sendBuf( encodeMsg( item ).buffer ); },
+			getHwFn: () => { return this.agent.getBufferedAmount(); },
+			queuesOrder
+		} );
 	}
 
 	on( event, handler ){
 		if( this.listenerNames.includes( event ) ) this.listeners[ event ] = handler;
 	}
 
-	send( { type, data }, resultCb = undefined ){
-		if( type !== 'file' ){
-			this.controlMsgQueue.push( { type, data } );
-		} else {
-			this.fileSendQueue.push( { data, resultCb } );
-		}
-		this.pump();
+	send( { type, data } ){
+		this.priorityChannel.send( this.typeToQueue( type ), { type, data } );
+		this.priorityChannel.pump;
 	};
 
 	signal( msg ){

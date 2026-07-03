@@ -7,6 +7,21 @@ import { QjsPeer } from './qjsPeer.mjs';
 
 const dec = new TextDecoder;
 
+function createPriorityQueues( peer ){
+	peer.createQueues( [ 'cmd', 'transfer', 'file' ] );
+	peer.typeToQueue = function( type ){
+		if( ![ 'result', 'eof', 'error', 'ready', 'file', 'chunk' ].includes( type ) ) throw( `error unknown peer msg type: ${ type }` );
+		const queue = type == 'file'
+			? 'file'
+			: type == 'chunk'
+				? 'transfer'
+				: 'cmd';
+		return queue;
+	};
+	peer.priorityChannel.addQueue( 'cmd' );
+	peer.priorityChannel.addQueue( 'file' );
+}
+
 // ---------------------------------------------------------------------------
 // parse cmd line args, get AWS ws credentials, determine if sender or receiver
 // ---------------------------------------------------------------------------
@@ -72,6 +87,7 @@ async function start() {
 
 			case 'offer':
 				peer = new QjsPeer( { label: 'data' } );
+				createPriorityQueues( peer );
 				peer.peerName = msg.from;
 				peer.myName = JSON.parse(
 					String.fromCharCode.apply( null, fromBase64( config.token.split( '.' )[1] ) )
@@ -109,6 +125,7 @@ async function start() {
 	if ( receiver !== undefined ) {
 		// Offerer: initiator:true triggers DataChannel creation + ICE gathering
 		peer = new QjsPeer( { initiator: true, label: 'data' } );
+		createPriorityQueues( peer );
 		peer.peerName = receiver;
 		peer.myName = JSON.parse(
 			String.fromCharCode.apply( null, fromBase64( config.token.split( '.' )[1] ) )
@@ -123,11 +140,7 @@ async function start() {
 			} ) );
 		} );
 
-		peer.on( 'connect', () => {
-			peer.send( { type: 'file', data: './p2p-client-dc' }, result => {
-				console.log( `[Send file] ${ result == 'success' ? 'done' : result }: ${ peer.sendFileObj.fileName }` );
-			} );
-		} );
+		peer.on( 'connect', () => { peer.send( { type: 'file', data: './p2p-client-dc' } ); } );
 
 		peer.on( 'disconnect', () => {
 			console.log( 'peer disconnected' );
@@ -169,24 +182,31 @@ function peerMsgHandler( peer, msg ){
 
 		case 'ready':
 			{
-				if( peer.sendFileObj.fileName != data ){
-					peer.sendFileObj.resultCb( { error: `peer.sendFileObj ${ peer.sendFileObj.fileName } != ${ data}` } );
-					delete peer.sendFileObj;
-					break;
-				}
-				const fd = os.open( peer.sendFileObj.fileName, os.O_RDONLY );
+				let fd = os.open( data, os.O_RDONLY );
 				if( fd < 0 ){
-					peer.sendFileObj.resultCb( { error: `pump: ${ os.strerr( fd ) }: opening ${ peer.sendFileObj.fileName } for reading` } );
-					delete peer.sendFileObj;
+					console.log( { error: `error ${ os.strerr( fd ) }: opening ${ data } for reading` } );
 					break;
 				}
-				peer.sendFileObj.fd = fd;
-				os.setTimeout( ()=> { peer.pump(); }, 0 );
+				console.log( '[Sending file] starting:', data );
+				let offset = 0;
+				let buf = new Uint8Array( 4096 );
+				peer.priorityChannel.addQueue( 'transfer', {
+					ready: () => { return fd != -1; },
+					next: () => {
+						let n = os.read( fd, buf.buffer, 0, buf.length );
+						if ( n <= 0 ){
+							os.close( fd );
+							fd = -1; offset = 0;
+							console.log( '[Sending file] finished:', data );
+							return { type: n == 0 ? 'eof' : 'error' };
+						} else {
+							offset += n;
+							return { type: 'chunk', data: buf.slice( 0, n ) };
+						}
+					}
+				} );
+				peer.priorityChannel.pump();
 			}
-			break;
-
-		case 'chunk':
-			os.write( peer.receiveFileObj.fd, data.buffer, 0, data.length );
 			break;
 
 		case 'eof':
@@ -194,14 +214,15 @@ function peerMsgHandler( peer, msg ){
 			console.log( `[Receiving file] ${ type == 'eof' ? 'finished' : 'sender error' }: ${ peer.receiveFileObj.fileName }` );
 			os.close( peer.receiveFileObj.fd );
 			if( type == 'error' ) os.remove( peer.receiveFileObj.fileName );
-			// if check sizes/checksums match send result with no data else send result with data: error message
-			peer.send( { type: 'result', data: 'success' } );
+			if( type == 'eof' ){
+				const status = 'success'; // or not if check sizes/checksums don't match
+				peer.send( { type: 'result', data: { fileName: peer.receiveFileObj.fileName, status } } );
+			}
 
 			break;
 
 		case 'result':
-			if( peer.sendFileObj?.resultCb ) peer.sendFileObj.resultCb( data );
-			delete peer.sendFileObj;
+			console.log( 'result:', data );
 			break;
 
 		default:

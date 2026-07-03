@@ -41,7 +41,7 @@ client_p2p: client_p2p.o juice.o socket.o
 dc.o: dc_module.c
 	$(CC) $(CFLAGS) -c dc_module.c -o dc.o
 
-p2p-client-dc.c: p2p-client-dc.mjs cognito.mjs parseUrl.mjs qjsWsClient.mjs EncodeDecode.mjs qjsPeer.mjs
+p2p-client-dc.c: p2p-client-dc.mjs cognito.mjs parseUrl.mjs qjsWsClient.mjs EncodeDecode.mjs qjsPeer.mjs priorityChannel.mjs
 	$(QJSC) -e -M socket.so,socket -M dc.so,dc -o p2p-client-dc.c p2p-client-dc.mjs
 
 p2p-client-dc.o: p2p-client-dc.c
