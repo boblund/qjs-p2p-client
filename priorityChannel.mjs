@@ -1,6 +1,7 @@
 export { PriorityChannel };
 
 class ArrayQueue extends Array{
+	blocked = false;
 	constructor(){ super(); }
 	ready(){ return this.length > 0; }
 	next(){ return this.shift(); }
@@ -28,6 +29,7 @@ class PriorityChannel {
 
 	addQueue( name, queueImpl = new ArrayQueue ) { this.#queues[ name ] = queueImpl; }
 	deleteQueue( name ) { delete this.#queues[ name ]; };
+	block( q, s ){ this.#queues[ q ].blocked = s; }
 
 	send( queueName, item ) {
 		if( this.#queues[ queueName ]?.push ) {
@@ -40,7 +42,7 @@ class PriorityChannel {
 		if( this.#draining ) return;
 		this.#draining = true;
 		while ( this.#getHwFn() < this.#highWaterMark ) {
-			const queuesItem = this.#queuesOrder.find( l => this.#queues[ l ]?.ready() );
+			const queuesItem = this.#queuesOrder.find( l => this.#queues[ l ]?.ready() && !this.#queues[ l ]?.blocked );
 			if ( !queuesItem ) break; // nothing to send anywhere
 			const queue = this.#queues[ queuesItem ];
 			this.#sendFn( queue.next() );

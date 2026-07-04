@@ -140,7 +140,11 @@ async function start() {
 			} ) );
 		} );
 
-		peer.on( 'connect', () => { peer.send( { type: 'transfer', data: './p2p-client-dc' } ); } );
+		peer.on( 'connect', () => {
+			peer.send( { type: 'transfer', data: './juice_module.c' } );
+			peer.priorityChannel.block( 'transfer', true );
+			peer.send( { type: 'transfer', data: './EncodeDecode.mjs' } );
+		} );
 
 		peer.on( 'disconnect', () => {
 			console.log( 'peer disconnected' );
@@ -197,7 +201,8 @@ function peerMsgHandler( peer, msg ){
 						if ( n <= 0 ){
 							os.close( fd );
 							fd = -1; offset = 0;
-							console.log( '[Sending file] starting:', data );
+							console.log( '[Sending file] ending:', data );
+							peer.priorityChannel.deleteQueue( 'chunk' );
 							return { type: n == 0 ? 'eof' : 'error' };
 						} else {
 							offset += n;
@@ -227,6 +232,8 @@ function peerMsgHandler( peer, msg ){
 
 		case 'result':
 			console.log( 'result:', data );
+			peer.priorityChannel.block( 'transfer', false );
+			peer.priorityChannel.pump();
 			break;
 
 		default:
