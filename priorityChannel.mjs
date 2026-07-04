@@ -26,10 +26,8 @@ class PriorityChannel {
 		this.#queuesOrder = queuesOrder;
 	}
 
-	addQueue( name, queueImpl = new ArrayQueue ) {
-		this.#queues[ name ] = queueImpl;
-		return { name, queue: queueImpl };
-	}
+	addQueue( name, queueImpl = new ArrayQueue ) { this.#queues[ name ] = queueImpl; }
+	deleteQueue( name ) { delete this.#queues[ name ]; };
 
 	send( queueName, item ) {
 		if( this.#queues[ queueName ]?.push ) {
@@ -45,9 +43,7 @@ class PriorityChannel {
 			const queuesItem = this.#queuesOrder.find( l => this.#queues[ l ]?.ready() );
 			if ( !queuesItem ) break; // nothing to send anywhere
 			const queue = this.#queues[ queuesItem ];
-			const item = queue.next();
-			const { type, data } = item;
-			this.#sendFn( { type, data } );
+			this.#sendFn( queue.next() );
 		}
 		this.#draining = false;
 	}
