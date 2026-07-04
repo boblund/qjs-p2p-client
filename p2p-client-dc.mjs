@@ -8,18 +8,18 @@ import { QjsPeer } from './qjsPeer.mjs';
 const dec = new TextDecoder;
 
 function createPriorityQueues( peer ){
-	peer.createQueues( [ 'cmd', 'transfer', 'file' ] );
+	peer.createQueues( [ 'cmd', 'chunk', 'transfer' ] );
 	peer.typeToQueue = function( type ){
-		if( ![ 'result', 'eof', 'error', 'ready', 'file', 'chunk' ].includes( type ) ) throw( `error unknown peer msg type: ${ type }` );
-		const queue = type == 'file'
-			? 'file'
+		if( ![ 'result', 'eof', 'error', 'ready', 'transfer', 'chunk' ].includes( type ) ) throw( `error unknown peer msg type: ${ type }` );
+		const queue = type == 'transfer'
+			? 'transfer'
 			: type == 'chunk'
-				? 'transfer'
+				? 'chunk'
 				: 'cmd';
 		return queue;
 	};
 	peer.priorityChannel.addQueue( 'cmd' );
-	peer.priorityChannel.addQueue( 'file' );
+	peer.priorityChannel.addQueue( 'transfer' );
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ async function start() {
 			} ) );
 		} );
 
-		peer.on( 'connect', () => { peer.send( { type: 'file', data: './p2p-client-dc' } ); } );
+		peer.on( 'connect', () => { peer.send( { type: 'transfer', data: './p2p-client-dc' } ); } );
 
 		peer.on( 'disconnect', () => {
 			console.log( 'peer disconnected' );
@@ -168,7 +168,7 @@ function peerMsgHandler( peer, msg ){
 			// process command
 			break;
 
-		case 'file': {
+		case 'transfer': {
 			const fd = os.open( `${ data }-received`, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644 );
 			if( fd < 0 ){
 				peer.send( { type: 'result', data: `${ os.strerr( fd ) }: opening ${ data }-received for 'w'` } );
@@ -190,14 +190,14 @@ function peerMsgHandler( peer, msg ){
 				console.log( '[Sending file] starting:', data );
 				let offset = 0;
 				let buf = new Uint8Array( 4096 );
-				peer.priorityChannel.addQueue( 'transfer', {
+				peer.priorityChannel.addQueue( 'chunk', {
 					ready: () => { return fd != -1; },
 					next: () => {
 						let n = os.read( fd, buf.buffer, 0, buf.length );
 						if ( n <= 0 ){
 							os.close( fd );
 							fd = -1; offset = 0;
-							console.log( '[Sending file] finished:', data );
+							console.log( '[Sending file] starting:', data );
 							return { type: n == 0 ? 'eof' : 'error' };
 						} else {
 							offset += n;
@@ -207,6 +207,10 @@ function peerMsgHandler( peer, msg ){
 				} );
 				peer.priorityChannel.pump();
 			}
+			break;
+
+		case 'chunk':
+			os.write( peer.receiveFileObj.fd, data.buffer, 0, data.length );
 			break;
 
 		case 'eof':
