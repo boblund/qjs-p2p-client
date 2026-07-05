@@ -7,7 +7,8 @@ import { QjsPeer } from './qjsPeer.mjs';
 
 const dec = new TextDecoder;
 
-function createPriorityQueues( peer ){
+function makePeer( { initiator = false, label = '', peerName } = {} ){
+	const peer = new QjsPeer( { initiator, label } );
 	peer.createQueues( [ 'cmd', 'chunk', 'transfer' ] );
 	peer.typeToQueue = function( type ){
 		if( ![ 'result', 'eof', 'error', 'ready', 'transfer', 'chunk' ].includes( type ) ) throw( `error unknown peer msg type: ${ type }` );
@@ -20,6 +21,11 @@ function createPriorityQueues( peer ){
 	};
 	peer.priorityChannel.addQueue( 'cmd' );
 	peer.priorityChannel.addQueue( 'transfer' );
+	peer.peerName = peerName;
+	peer.myName = JSON.parse(
+		String.fromCharCode.apply( null, fromBase64( config.token.split( '.' )[1] ) )
+	)['custom:brume_name'];
+	return peer;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,24 +92,16 @@ async function start() {
 				break;
 
 			case 'offer':
-				peer = new QjsPeer( { label: 'data' } );
-				createPriorityQueues( peer );
-				peer.peerName = msg.from;
-				peer.myName = JSON.parse(
-					String.fromCharCode.apply( null, fromBase64( config.token.split( '.' )[1] ) )
-				)['custom:brume_name'];
-
+				peer = makePeer( { label: 'data', peerName: msg.from } );
 				peer.on( 'data', ( msg ) => { peerMsgHandler( peer, msg ); } );
 				peer.on( 'sdp', ( sdp ) => {
 					wsc.send( JSON.stringify( {
 						action: 'send',
 						to: peer.peerName,
-						data: { type: peer.initiator ? 'offer' : 'answer', sdp }
+						data: { type: 'answer', sdp }
 					} ) );
 				} );
-
 				peer.signal( msg ); // sets the remote sdp and triggers answer + ICE gathering
-
 				peer.on( 'disconnect', () => {
 					console.log( 'peer disconnected' );
 					std.exit();
@@ -123,21 +121,10 @@ async function start() {
 	} );
 
 	if ( receiver !== undefined ) {
-		// Offerer: initiator:true triggers DataChannel creation + ICE gathering
-		peer = new QjsPeer( { initiator: true, label: 'data' } );
-		createPriorityQueues( peer );
-		peer.peerName = receiver;
-		peer.myName = JSON.parse(
-			String.fromCharCode.apply( null, fromBase64( config.token.split( '.' )[1] ) )
-		)['custom:brume_name'];
-
+		peer = makePeer( { initiator: true, label: 'data', peerName: receiver } );
 		peer.on( 'data', ( msg ) => { peerMsgHandler( peer, msg ); } );
 		peer.on( 'sdp', ( sdp ) => {
-			wsc.send( JSON.stringify( {
-				action: 'send',
-				to: peer.peerName,
-				data: { type: peer.initiator ? 'offer' : 'answer', sdp }
-			} ) );
+			wsc.send( JSON.stringify( { action: 'send', to: peer.peerName, data: { type: 'offer', sdp } } ) );
 		} );
 
 		peer.on( 'connect', () => {
