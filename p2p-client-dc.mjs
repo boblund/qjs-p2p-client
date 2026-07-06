@@ -146,14 +146,7 @@ async function start() {
 // Handles peer-to-peer commands and file transfer
 // ---------------------------------------------------------------------------
 
-function peerMsgHandler( peer, msg ){
-	//const { text, type } = { text: msg.data[ 0 ] << 7, type: msg.data[ 0 ] && 0x7F };
-	const type = dec.decode( msg.data.slice( 1, 1 + msg.data[0] ) );
-	// const data = text == 1
-	const data = type != 'chunk'
-		? JSON.parse( dec.decode( msg.data.slice( 1 + msg.data[0], msg.data.length ) ) )
-		: msg.data.slice( 1 + msg.data[ 0 ] );
-
+function peerMsgHandler( peer, { type, data } ){
 	switch( type ){
 		case 'cmd':
 			// process command

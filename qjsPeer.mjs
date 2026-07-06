@@ -117,7 +117,13 @@ function dcMsgHandler( qjspeer ) {
 				break;
 
 			case PeerConnection.MSG_DATA: // message from peer
-				qjspeer.listeners.data( msg );
+				//const { text, type } = { text: msg.data[ 0 ] << 7, type: msg.data[ 0 ] && 0x7F };
+				const type = dec.decode( msg.data.slice( 1, 1 + msg.data[0] ) );
+				// const data = text == 1
+				const data = type != 'chunk'
+					? JSON.parse( dec.decode( msg.data.slice( 1 + msg.data[0] ) ) ) //, msg.data.length ) ) )
+					: msg.data.slice( 1 + msg.data[ 0 ] );
+				qjspeer.listeners.data( { type, data } );//( msg );
 				break;
 
 			case PeerConnection.MSG_BUFFERED_LOW: // datachannel ready for more messages
