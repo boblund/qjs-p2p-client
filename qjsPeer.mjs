@@ -7,11 +7,12 @@ import { PriorityChannel } from './priorityChannel.mjs';
 const enc = new TextEncoder;
 
 function encodeMsg( { type, data = {} } ){
-	const _data = data instanceof Uint8Array ? data : enc.encode( JSON.stringify( data ) );
+	const text = data instanceof Uint8Array ? 0 : 1;
+	const _data = text == 1 ? enc.encode( JSON.stringify( data ) ) : data;
 	const a = new Uint8Array( 1 + type.length + _data.length );
-	a[ 0 ] = type.length;
+	a[ 0 ] = ( text << 7 ) | ( type.length & 0x7F );
 	a.set( enc.encode( type ), 1 );
-	a.set( _data, 1 + a[ 0 ] );
+	a.set( _data, 1 + type.length );
 	return a;
 }
 
@@ -117,13 +118,12 @@ function dcMsgHandler( qjspeer ) {
 				break;
 
 			case PeerConnection.MSG_DATA: // message from peer
-				//const { text, type } = { text: msg.data[ 0 ] << 7, type: msg.data[ 0 ] && 0x7F };
-				const type = dec.decode( msg.data.slice( 1, 1 + msg.data[0] ) );
-				// const data = text == 1
-				const data = type != 'chunk'
-					? JSON.parse( dec.decode( msg.data.slice( 1 + msg.data[0] ) ) ) //, msg.data.length ) ) )
-					: msg.data.slice( 1 + msg.data[ 0 ] );
-				qjspeer.listeners.data( { type, data } );//( msg );
+				const [ text, typeLength ] = [ msg.data[0] >> 7, msg.data[0] & 0x7F ];
+				const type = dec.decode( msg.data.slice( 1, 1 + typeLength ) );
+				const data = text == 1
+					? JSON.parse( dec.decode( msg.data.slice( 1 + typeLength ) ) )
+					: msg.data.slice( 1 + typeLength );
+				qjspeer.listeners.data( { type, data } );
 				break;
 
 			case PeerConnection.MSG_BUFFERED_LOW: // datachannel ready for more messages
