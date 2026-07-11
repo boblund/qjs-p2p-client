@@ -8,8 +8,61 @@ import { TextEncoder, TextDecoder } from './EncodeDecode.mjs';
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+function wsFrame( opcode, payload, masked = false ) {
+	const payloadLen = payload.length;
+	const FIN = 0x80;
+	const MASK = masked ? 0x80 : 0x00;
+	const headerLen = ( payloadLen < 126
+		? 2
+		: payloadLen <= 0xFFFF
+			? 4
+			: 10
+	) + ( masked ? 4 : 0 );
+
+	const buf = new Uint8Array( headerLen + payloadLen );
+	let offset = 0;
+
+	buf[offset++] = FIN | opcode;
+
+	if ( payloadLen < 126 ) {
+		buf[offset++] = MASK | payloadLen;
+	} else if ( payloadLen <= 0xFFFF ) {
+		buf[offset++] = MASK | 126;
+		buf[offset++] = ( payloadLen >> 8 ) & 0xFF;
+		buf[offset++] = payloadLen & 0xFF;
+	} else {
+		buf[offset++] = MASK | 127;
+		buf[offset++] = 0; buf[offset++] = 0; buf[offset++] = 0; buf[offset++] = 0;
+		buf[offset++] = ( payloadLen >>> 24 ) & 0xFF;
+		buf[offset++] = ( payloadLen >>> 16 ) & 0xFF;
+		buf[offset++] = ( payloadLen >>> 8 )  & 0xFF;
+		buf[offset++] = payloadLen & 0xFF;
+	}
+
+	if( masked ){
+		const maskKey = [
+			( Math.random() * 256 ) | 0,
+			( Math.random() * 256 ) | 0,
+			( Math.random() * 256 ) | 0,
+			( Math.random() * 256 ) | 0
+		];
+		buf[offset++] = maskKey[0];
+		buf[offset++] = maskKey[1];
+		buf[offset++] = maskKey[2];
+		buf[offset++] = maskKey[3];
+
+		for ( let i = 0; i < payloadLen; i++ ) {
+			buf[offset++] = payload[i] ^ maskKey[i % 4];
+		}
+	} else {
+		buf.set( payload, offset );
+	}
+
+	return buf;
+}
+
 // ws client frame builder
-function buildMaskedFrame( opcode, payload ) {
+function old_buildMaskedFrame( opcode, payload ) {
 	const payloadLen = payload.length;
 
 	let headerLen;
@@ -90,6 +143,15 @@ class WsClient {
 			if( len == 126 ){
 				ofs = 4;
 				len = ( readBuf[2] << 8 ) | readBuf[3];
+			} else if ( len === 127 ) {
+				if( readBuf.length < ofs + 8 ) return null;
+
+				// top 4 bytes should be 0 for realistic sizes; if not, payload is >4GB (reject/handle separately)
+				const high = ( readBuf[ofs] << 24 ) | ( readBuf[ofs + 1] << 16 ) | ( readBuf[ofs + 2] << 8 ) | readBuf[ofs + 3];
+				if ( high !== 0 ) throw new Error( 'Payload too large' );
+
+				len = ( ( readBuf[ofs + 4] << 24 ) | ( readBuf[ofs + 5] << 16 ) | ( readBuf[ofs + 6] << 8 ) | readBuf[ofs + 7] ) >>> 0;
+				ofs += 8;
 			}
 
 			if( ( continueOpcode == 0 &&  opcode == 0 )
@@ -163,21 +225,12 @@ class WsClient {
 	};
 
 	close( code, reason ) {
-		let reasonBytes = reason ? enc.encode( reason ) : new Uint8Array( 0 );
-
-		// Control frame reason max 123 bytes
-		const maxReasonBytes = 123;
-		if ( reasonBytes.length > maxReasonBytes ) {
-			reasonBytes = reasonBytes.slice( 0, maxReasonBytes );
-			// may cut a multi-byte UTF-8 sequence in half, acceptable for a truncated close reason
-		}
-
+		const reasonBytes = reason ? enc.encode( reason ).slice( 0, 123 ) : new Uint8Array( 0 ); // 123 max length
 		const payload = new Uint8Array( 2 + reasonBytes.length );
 		payload[0] = ( code >> 8 ) & 0xFF;
 		payload[1] = code & 0xFF;
 		payload.set( reasonBytes, 2 );
-
-		const buf = buildMaskedFrame( 0x8, payload );
+		const buf = wsFrame( 0x8, payload, true );
 		os.write( this.#fds[1], buf.buffer, 0, buf.byteLength );
 		this.end();
 	}
@@ -185,13 +238,13 @@ class WsClient {
 	on( event, func ){ if( this.#listenerNames.includes( event ) ) this.#listenerFuncs[ event] = func; };
 
 	ping() {
-		const buf = buildMaskedFrame( 0x9, new Uint8Array( 0 ) );
+		const buf = wsFrame( 0x9, new Uint8Array( 0 ), true );
 		os.write( this.#fds[1], buf.buffer, 0, buf.byteLength );
 	}
 
 	send( message ) {
 		const payload = enc.encode( message );
-		const buf = buildMaskedFrame( typeof message == 'string' ? 0x1 : 0x2, payload );
+		const buf = wsFrame( typeof message == 'string' ? 0x1 : 0x2, payload, true );
 		os.write( this.#fds[1], buf.buffer, 0, buf.byteLength );
 	}
 
