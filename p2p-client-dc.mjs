@@ -168,7 +168,10 @@ function peerMsgHandler( peer, { type, data } ){
 			{
 				let fd = os.open( data, os.O_RDONLY );
 				if( fd < 0 ){
-					console.log( { error: `error ${ os.strerr( fd ) }: opening ${ data } for reading` } );
+					console.log( { error: `error ${ std.strerror( -fd ) }: opening ${ data } for reading` } );
+					peer.send( { type: 'error' } );
+					peer.priorityChannel.block( 'transfer', false );
+					peer.priorityChannel.pump();
 					break;
 				}
 				console.log( '[Sending file] starting:', data );
