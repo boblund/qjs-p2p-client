@@ -1,6 +1,6 @@
 import * as std from 'std';
 import * as os from 'os';
-import { newWsClient } from './qjsWsClient.mjs';
+import { newWsClient } from './wsClient.mjs';
 import { refreshIdToken } from './cognito.mjs';
 import { TextDecoder, fromBase64 } from './EncodeDecode.mjs';
 import { QjsPeer } from './qjsPeer.mjs';

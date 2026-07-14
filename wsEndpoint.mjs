@@ -7,6 +7,32 @@ import { TextEncoder, TextDecoder } from './EncodeDecode.mjs';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+const MAX_PAYLOAD = 1024 * 1000;
+
+function concatUint8( a, b ){
+	const r = new Uint8Array( a.length + b.length );
+	r.set( a, 0 );
+	r.set( b, a.length );
+	return r;
+}
+
+function frameError( fds, closeFn, e ){
+	const maxReasonBytes = 123;
+	const reasonBytes = e.msg.length > maxReasonBytes
+		? e.msg.slice( 0, maxReasonBytes )
+		:	e.msg;
+
+	const payload = new Uint8Array( 2 + reasonBytes.length );
+	payload[0] = ( e.code >> 8 ) & 0xFF;
+	payload[1] = e.code & 0xFF;
+	payload.set( reasonBytes, 2 );
+	const frame = wsFrame( 0x8, payload );
+	os.write( fds[ 1 ], frame.buffer, 0, frame.length );
+	closeFn();
+	os.setReadHandler( fds[ 0 ], null );
+	os.close( fds[ 0 ] ); os.close( fds[ 1 ] );
+	fds[ 0 ] = fds[ 1 ] = -1;
+}
 
 function wsFrame( opcode, payload, masked = false ) {
 	const payloadLen = payload.length;
@@ -61,58 +87,10 @@ function wsFrame( opcode, payload, masked = false ) {
 	return buf;
 }
 
-// ws client frame builder
-function old_buildMaskedFrame( opcode, payload ) {
-	const payloadLen = payload.length;
-
-	let headerLen;
-	if ( payloadLen < 126 )          headerLen = 6;
-	else if ( payloadLen <= 0xFFFF ) headerLen = 8;
-	else                              headerLen = 14;
-
-	const buf = new Uint8Array( headerLen + payloadLen );
-	let offset = 0;
-
-	buf[offset++] = 0x80 | opcode;
-
-	if ( payloadLen < 126 ) {
-		buf[offset++] = 0x80 | payloadLen;
-	} else if ( payloadLen <= 0xFFFF ) {
-		buf[offset++] = 0x80 | 126;
-		buf[offset++] = ( payloadLen >> 8 ) & 0xFF;
-		buf[offset++] = payloadLen & 0xFF;
-	} else {
-		buf[offset++] = 0x80 | 127;
-		buf[offset++] = 0; buf[offset++] = 0; buf[offset++] = 0; buf[offset++] = 0;
-		buf[offset++] = ( payloadLen >>> 24 ) & 0xFF;
-		buf[offset++] = ( payloadLen >>> 16 ) & 0xFF;
-		buf[offset++] = ( payloadLen >>> 8 )  & 0xFF;
-		buf[offset++] = payloadLen & 0xFF;
-	}
-
-	const maskKey = [
-		( Math.random() * 256 ) | 0,
-		( Math.random() * 256 ) | 0,
-		( Math.random() * 256 ) | 0,
-		( Math.random() * 256 ) | 0
-	];
-	buf[offset++] = maskKey[0];
-	buf[offset++] = maskKey[1];
-	buf[offset++] = maskKey[2];
-	buf[offset++] = maskKey[3];
-
-	for ( let i = 0; i < payloadLen; i++ ) {
-		buf[offset++] = payload[i] ^ maskKey[i % 4];
-	}
-
-	return buf;
-}
-
 class WsClient {
 	#listenerFuncs = {
 		close(){},
 		message(){},
-		ping(){},
 		pong(){},
 	};
 
@@ -125,101 +103,139 @@ class WsClient {
 		this.#socket = socket; // keeps socket alive while the WsClient instance exists
 		let continueOpcode = 0, chunks = [], totalLength = 0, msg;
 		let readBuf = new Uint8Array( 4096 );
+		let buf = new Uint8Array( 0 );
 
 		os.setReadHandler( this.#fds[ 0 ], () => {
 			const n = os.read( this.#fds[ 0 ], readBuf.buffer, 0, readBuf.length );
 
+			//move
 			if( n == 0 || ( n == 1 && readBuf[ 0 ] == 0 ) ){
 				this.#listenerFuncs.close( { code: 1006, reason: 'server abnormal close' } );
 				this.close();
 				return;
 			}
 
-			const fin = ( readBuf[ 0 ] >> 7 ) && 0x1;
-			const opcode = readBuf[ 0 ] & 0xf;
+			let opcode, fin, ofs, len, masked;
+			if( n > 0 ){
+				buf = concatUint8( buf, readBuf.slice( 0, n ) );
+				while( true ){
+					if ( buf.length < 2 ) return;
 
-			let ofs = 2;
-			let len = readBuf[1] & 0x7F;
-			if( len == 126 ){
-				ofs = 4;
-				len = ( readBuf[2] << 8 ) | readBuf[3];
-			} else if ( len === 127 ) {
-				if( readBuf.length < ofs + 8 ) return null;
+					fin = ( buf[ 0 ] >> 7 ) && 0x1;
+					opcode = buf[ 0 ] & 0xf;
+					masked = Boolean( buf[1] & 0x80 );
+					len = buf[1] & 0x7F;
+					ofs = 2;
 
-				// top 4 bytes should be 0 for realistic sizes; if not, payload is >4GB (reject/handle separately)
-				const high = ( readBuf[ofs] << 24 ) | ( readBuf[ofs + 1] << 16 ) | ( readBuf[ofs + 2] << 8 ) | readBuf[ofs + 3];
-				if ( high !== 0 ) throw new Error( 'Payload too large' );
-
-				len = ( ( readBuf[ofs + 4] << 24 ) | ( readBuf[ofs + 5] << 16 ) | ( readBuf[ofs + 6] << 8 ) | readBuf[ofs + 7] ) >>> 0;
-				ofs += 8;
-			}
-
-			if( ( continueOpcode == 0 &&  opcode == 0 )
-					|| ( continueOpcode != 0 &&  opcode != 0 ) ){
-				continueOpcode = 0, msg = '';
-				this.close( 1002 ); // protocol error
-				return;
-			}
-
-			const isControl = opcode >= 0x8;
-			if( isControl && ( !fin || len > 125 ) ){
-				this.close( 1002 ); // protocol error: fragmented or oversized control frame
-				return;
-			}
-
-			switch( opcode ){
-				case 0:
-				case 1:
-				case 2:
-					if( opcode == 1 || continueOpcode == 1 ){
-						chunks.push( String.fromCharCode.apply( null, readBuf.slice( ofs, ofs + len ) ) );
-					} else {
-						totalLength += len;
-						chunks.push( new Uint8Array( readBuf.slice( ofs, ofs + len ) ) );
-					}
-
-					if( fin == 1 ){
-						if( opcode == 1 || continueOpcode == 1 ){
-							msg = chunks.join( "" );
-							this.#listenerFuncs.message( msg );
-						} else {
-							const result = new Uint8Array( totalLength );
-							let offset = 0;
-							for ( const c of chunks ) { result.set( c, offset ); offset += c.byteLength; }
-							this.#listenerFuncs.message( result );
+					if( len == 126 ){
+						if( buf.length < ofs + 2 ) return;
+						len = ( buf[ofs] << 8 ) | buf[ofs + 1];
+						ofs += 2;
+					} else if ( len === 127 ) {
+						if( buf.length < ofs + 8 ) return;
+						// top 4 bytes should be 0 for realistic sizes; if not, payload is >4GB (reject/handle separately)
+						const high = ( buf[ofs] << 24 ) | ( buf[ofs + 1] << 16 ) | ( buf[ofs + 2] << 8 ) | buf[ofs + 3];
+						if ( high !== 0 ){
+							frameError( fds, this.#listenerFuncs.close, { code: 1002, msg: 'Payload too large' } );
+							return;
 						}
-						totalLength = 0;
-						msg = '';
-						chunks = [];
-						continueOpcode = 0; // may be final frame of multi-frame msg
-					}else{
-						if( opcode != 0 ) continueOpcode = opcode; // 1st frame of multi-frame msg
-					}
-					break;
 
-				case 8:
-					let statusCode = 1005; // "No Status Received" per RFC 6455, the correct default
-					let reason = '';
+						len = (
+							( buf[ofs + 4] << 24 ) |
+							( buf[ofs + 5] << 16 ) |
+							( buf[ofs + 6] << 8 ) |
+							buf[ofs + 7]
+						) >>> 0;
 
-					if( len >= 2 ){
-						statusCode = ( readBuf[ofs] << 8 ) | readBuf[ofs + 1];
-						reason = new TextDecoder().decode( readBuf.slice( ofs + 2, ofs + len ) );
+						ofs += 8;
 					}
 
-					this.#listenerFuncs.close( { code: r.statusCode, message: r.reason } );
-					this.close();
-					msg = '';
-					break;
+					let maskingKey = null;
+					if ( masked ) {
+						if ( buf.length < ofs + 4 ) return;
+						maskingKey = buf.slice( ofs, ofs + 4 );
+						ofs += 4;
+					}
 
-				case 9:
-					this.#listenerFuncs.ping();
-					break;
+					if( len > MAX_PAYLOAD ){
+						frameError( fds, this.#listenerFuncs.close, { code: 1002, msg: 'Payload too large' } );
+						return;
+					}
 
-				case 10:
-					this.#listenerFuncs.pong();
-					break;
+					if ( buf.length < ofs + len ) return;
 
-				default:
+					if( ( continueOpcode == 0 &&  opcode == 0 )
+							|| ( continueOpcode != 0 &&  opcode != 0 ) ){
+						continueOpcode = 0, msg = '';
+						this.close( 1002 ); // protocol error
+						return;
+					}
+
+					const isControl = opcode >= 0x8;
+					if( isControl && ( !fin || len > 125 ) ){
+						//this.control( 0x08, 1002, 'fragmented or oversized control frame' );
+						this.close( 1002 ); // protocol error: fragmented or oversized control frame
+						return;
+					}
+
+					switch( opcode ){
+						case 0:
+						case 1:
+						case 2:
+							if( opcode == 1 || continueOpcode == 1 ){
+								chunks.push( String.fromCharCode.apply( null, buf.slice( ofs, ofs + len ) ) );
+							} else {
+								totalLength += len;
+								chunks.push( new Uint8Array( buf.slice( ofs, ofs + len ) ) );
+							}
+
+							if( fin == 1 ){
+								if( opcode == 1 || continueOpcode == 1 ){
+									msg = chunks.join( "" );
+									this.#listenerFuncs.message( msg );
+								} else {
+									const result = new Uint8Array( totalLength );
+									let offset = 0;
+									for ( const c of chunks ) { result.set( c, offset ); offset += c.byteLength; }
+									this.#listenerFuncs.message( result );
+								}
+								totalLength = 0;
+								msg = '';
+								chunks = [];
+								continueOpcode = 0; // may be final frame of multi-frame msg
+							}else{
+								if( opcode != 0 ) continueOpcode = opcode; // 1st frame of multi-frame msg
+							}
+							break;
+
+						case 8:
+							let statusCode = 1005; // "No Status Received" per RFC 6455, the correct default
+							let reason = '';
+
+							if( len >= 2 ){
+								statusCode = ( readBuf[ofs] << 8 ) | readBuf[ofs + 1];
+								reason = new TextDecoder().decode( readBuf.slice( ofs + 2, ofs + len ) );
+							}
+
+							this.#listenerFuncs.close( { code: r.statusCode, message: r.reason } );
+							this.close();
+							msg = '';
+							// this should close connection
+							break;
+
+						case 9:
+							//this.#listenerFuncs.ping();
+							// respond with pong
+							break;
+
+						case 10:
+							this.#listenerFuncs.pong();
+							break;
+
+						default:
+					}
+					buf =  buf.slice( ofs + len ); // working buf is now whatever wasn't part of sent frame
+				}
 			}
 		} );
 	};
