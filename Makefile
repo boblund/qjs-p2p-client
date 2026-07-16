@@ -8,8 +8,7 @@ CFLAGS = -O0 -g -Wall -fPIC \
 LDFLAGS = \
 			-L/usr/local/lib/quickjs -lquickjs \
 			-L/opt/homebrew/opt/openssl/lib -lssl -lcrypto \
-			-L/usr/local/lib/libjuice  -ljuice \
-			-L/usr/local/lib/libdatachannel -ldatachannel -lusrsctp \
+			-L/usr/local/lib/libdatachannel -ldatachannel -lusrsctp -ljuice \
 			-lm -lpthread -ldl
 #
 # To bundle all libs:
