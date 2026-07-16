@@ -348,7 +348,20 @@ static JSValue js_rtc_get_buffered_amount(JSContext *ctx, JSValueConst this_val,
 // Class / module wiring
 // ---------------------------------------------------------------------------
 
-static JSClassDef dc_class = { "PeerConnection" };
+static void dc_finalizer(JSRuntime *rt, JSValue val) {
+    dc_ctx_t *dctx = JS_GetOpaque(val, dc_class_id);
+    if (!dctx) return;
+    if (dctx->dc >= 0) rtcDeleteDataChannel(dctx->dc);
+    rtcDeletePeerConnection(dctx->pc);
+    close(dctx->write_fd);
+    close(dctx->read_fd);
+    js_free_rt(rt, dctx);
+}
+
+static JSClassDef dc_class = {
+	"PeerConnection",
+	.finalizer = dc_finalizer
+};
 
 static const JSCFunctionListEntry dc_proto_funcs[] = {
     JS_CFUNC_DEF("connect",               1, js_dc_connect),
