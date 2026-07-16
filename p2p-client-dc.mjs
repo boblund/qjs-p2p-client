@@ -104,7 +104,9 @@ async function start() {
 				peer.signal( msg ); // sets the remote sdp and triggers answer + ICE gathering
 				peer.on( 'disconnect', () => {
 					console.log( 'peer disconnected' );
-					std.exit();
+					peer.close();
+					peer = undefined;
+					//std.exit();
 				} );
 
 				break;
@@ -135,7 +137,9 @@ async function start() {
 
 		peer.on( 'disconnect', () => {
 			console.log( 'peer disconnected' );
-			std.exit();
+			peer.close();
+			peer = undefined;
+			//std.exit();
 		} );
 	}
 }
