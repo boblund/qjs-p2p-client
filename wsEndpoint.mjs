@@ -15,10 +15,11 @@ function concatUint8( a, b ){
 }
 
 function closeFrame( code, reason, masked ){
-	const payload = new Uint8Array( 2 + reason.length );
+	const reasonBuf = enc.encode( reason );
+	const payload = new Uint8Array( 2 + reasonBuf.length );
 	payload[0] = ( code >> 8 ) & 0xFF;
 	payload[1] = code & 0xFF;
-	payload.set( reason, 2 );
+	payload.set( reasonBuf, 2 );
 	return wsFrame( 0x8, payload, masked );
 }
 
@@ -120,7 +121,7 @@ class WsEndpoint {
 				} else {
 					closeTcp( this.#fds );
 					this.#listenerFuncs.close( n == 1
-						? { code: 1001, reason: 'Going away' } //qjs socket server behavior
+						? { code: 1001, reason: 'TCP closed' } //qjs socket server behavior
 						: { code: 1006, reason: 'Abnormal closure' }
 					);
 				}
@@ -143,15 +144,15 @@ class WsEndpoint {
 					ofs += 2;
 				} else if ( len === 127 ) {
 					if( buf.length < ofs + 8 ) return;
-					// top 4 bytes should be 0 for realistic sizes; if not, payload is >4GB (reject/handle separately)
-					const high = ( buf[ofs] << 24 ) | ( buf[ofs + 1] << 16 ) | ( buf[ofs + 2] << 8 ) | buf[ofs + 3];
-					if ( high !== 0 ){
+
+					// top 4 bytes should be 0 for realistic sizes; if not, payload is >4GB
+					if( buf.slice( ofs, ofs + 4 ).find( e => e > 0 ) ){
 						const frame = closeFrame( 1009, 'Payload too large' );
 						os.write( fds[ 1 ], frame.buffer, 0, frame.length );
-						this.#closing= true;
+						this.#closing = true;
 						this.#closeTimeout = setTimeout( () => {
 							closeTcp( fds );
-							this.#closing= false;
+							this.#closing = false;
 							this.#closeTimeout = undefined;
 						}, 5000 );
 						return;
@@ -177,10 +178,10 @@ class WsEndpoint {
 				if( len > MAX_PAYLOAD ){
 					const frame = closeFrame( 1009, 'Payload too large' );
 					os.write( fds[ 1 ], frame.buffer, 0, frame.length );
-					this.#closing= true;
+					this.#closing = true;
 					this.#closeTimeout = setTimeout( () => {
 						closeTcp( fds );
-						this.#closing= false;
+						this.#closing = false;
 						this.#closeTimeout = undefined;
 					}, 5000 );
 					return;
@@ -188,31 +189,31 @@ class WsEndpoint {
 
 				if ( buf.length < ofs + len ) return;
 
+				let payload = masked
+					? buf.slice( ofs, ofs + len ).map( ( byte, i ) => byte ^ maskingKey[i % 4] )
+					: buf.slice( ofs, ofs + len );
+
 				if( opcode >= 0x8 ){
 					if( opcode > 0xA || !fin || len > 125 ){
 						// bad frame close
 						return;
 					}
 
-					let payload = masked
-						? buf.slice( ofs, ofs + len ).map( ( byte, i ) => byte ^ maskingKey[i % 4] )
-						: buf.slice( ofs, ofs + len );
-
 					switch( opcode ){
 						case 0x8:	//close
 							if( this.#closing ){ // response to echoed close
-								console.log( 'close server response' );
+								console.log( `${ this.#role } received ws close while closing` );
 								if( this.#role == 'server' ){
 									closeTcp( this.#fds );
 									this.#closing = false;
 								}
 								// client ignores
 							} else {
+								console.log( `${ this.#role } received ws close` );
 								let code = new DataView( payload.buffer ).getUint16( 0 );
 								let reason = dec.decode( payload.slice( 2 ) );
-								console.log( `${ this.#role } received close. code: ${ code }, reason: ${ reason }` );
 								this.#listenerFuncs.close( { code, reason } );
-								const frame = wsFrame( opcode, buf.slice( ofs, ofs + len ) );
+								const frame = closeFrame( code, reason );
 								os.write( this.#fds[1], frame.buffer, 0, frame.byteLength );
 
 								if( this.#role == 'client' ){
@@ -262,10 +263,6 @@ class WsEndpoint {
 					case 0:
 					case 1:
 					case 2:
-						let payload = masked
-							? buf.slice( ofs, ofs + len ).map( ( byte, i ) => byte ^ maskingKey[i % 4] )
-							: buf.slice( ofs, ofs + len );
-
 						if( opcode == 1 || continueOpcode == 1 ){
 							chunks.push( String.fromCharCode.apply( null, payload ) );
 						} else {
@@ -312,13 +309,12 @@ class WsEndpoint {
 		os.write( this.#fds[1], frame.buffer, 0, frame.length );
 	}
 
-	close(){
+	close( code = 1000, reason = 'application close' ){
 		this.#closing = true;
-		const frame = closeFrame( 1000, 'application close' );
+		const frame = closeFrame( code, reason );
 		os.write( this.#fds[ 1 ], frame.buffer, 0, frame.length );
 		this.#closeTimeout = os.setTimeout( () => {
 			closeTcp( this.#fds );
-			//this.#listenerFuncs.close( { code: 1000, reason: 'Normal closure' } );
 			this.#closing = false;
 			this.#closeTimeout = undefined;
 		}, 5000 );
