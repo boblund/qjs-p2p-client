@@ -1,6 +1,6 @@
 import * as std from 'std';
 import * as os from 'os';
-import { newWsClient } from './qjsWsClient.mjs';
+import { newWsClient } from './wsClient.mjs';
 import { refreshIdToken } from './cognito.mjs';
 import { TextDecoder, fromBase64 } from './EncodeDecode.mjs';
 import { QjsPeer } from './qjsPeer.mjs';
@@ -104,7 +104,9 @@ async function start() {
 				peer.signal( msg ); // sets the remote sdp and triggers answer + ICE gathering
 				peer.on( 'disconnect', () => {
 					console.log( 'peer disconnected' );
-					std.exit();
+					peer.close();
+					peer = undefined;
+					//std.exit();
 				} );
 
 				break;
@@ -135,7 +137,9 @@ async function start() {
 
 		peer.on( 'disconnect', () => {
 			console.log( 'peer disconnected' );
-			std.exit();
+			peer.close();
+			peer = undefined;
+			//std.exit();
 		} );
 	}
 }

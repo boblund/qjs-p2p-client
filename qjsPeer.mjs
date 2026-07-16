@@ -47,6 +47,10 @@ class QjsPeer{
 		dcMsgHandler( this );
 	}
 
+	close(){
+		this.agent.close();
+	}
+
 	createQueues( queuesOrder ){
 		this.priorityChannel = new PriorityChannel( {
 			sendFn: ( item ) => { this.agent.sendBuf( encodeMsg( item ).buffer ); },
